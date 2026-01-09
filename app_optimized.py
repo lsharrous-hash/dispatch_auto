@@ -10,6 +10,8 @@ from data_processor import load_data, preparer_telechargement_excel
 from shapely.geometry import shape, Point
 import zipfile
 import io
+import unicodedata
+import re
 
 # Configuration
 st.set_page_config(layout="wide", page_title="Dispatch Auto - JNR Transport")
@@ -73,27 +75,133 @@ def get_driver_color(index):
     ]
     return colors[index % len(colors)]
 
-def point_in_zones(lat, lon, zones):
-    """Vérifie si un point est dans une des zones."""
-    point = Point(lon, lat)
-    for zone in zones:
-        polygon = shape(zone)
-        if polygon.contains(point):
+def normalize_text(text):
+    """Normalise le texte pour comparaison (accents, casse, tirets, espaces)."""
+    if not text or pd.isna(text):
+        return ""
+    text = str(text).lower().strip()
+    # Supprimer les accents
+    text = unicodedata.normalize('NFD', text)
+    text = ''.join(c for c in text if unicodedata.category(c) != 'Mn')
+    # Remplacer tirets et espaces multiples
+    text = re.sub(r'[-_\s]+', ' ', text)
+    # Supprimer caractères spéciaux
+    text = re.sub(r'[^a-z0-9\s]', '', text)
+    return text.strip()
+
+def levenshtein_distance(s1, s2):
+    """Calcule la distance de Levenshtein entre deux chaînes."""
+    if len(s1) < len(s2):
+        return levenshtein_distance(s2, s1)
+    if len(s2) == 0:
+        return len(s1)
+    
+    previous_row = range(len(s2) + 1)
+    for i, c1 in enumerate(s1):
+        current_row = [i + 1]
+        for j, c2 in enumerate(s2):
+            insertions = previous_row[j + 1] + 1
+            deletions = current_row[j] + 1
+            substitutions = previous_row[j] + (c1 != c2)
+            current_row.append(min(insertions, deletions, substitutions))
+        previous_row = current_row
+    
+    return previous_row[-1]
+
+def fuzzy_match_city(city_input, city_list, max_distance=2):
+    """Vérifie si une ville correspond à la liste avec tolérance aux fautes."""
+    if not city_list or not city_input:
+        return False
+    
+    normalized_input = normalize_text(city_input)
+    if not normalized_input:
+        return False
+    
+    for city in city_list:
+        normalized_city = normalize_text(city)
+        if not normalized_city:
+            continue
+        
+        # Match exact après normalisation
+        if normalized_input == normalized_city:
             return True
+        
+        # Match si l'un contient l'autre (pour "Reims,Reims" ou "Saint-Memmie")
+        if normalized_input in normalized_city or normalized_city in normalized_input:
+            return True
+        
+        # Fuzzy match avec distance de Levenshtein
+        # Tolérance proportionnelle à la longueur du mot
+        tolerance = min(max_distance, max(1, len(normalized_city) // 4))
+        if levenshtein_distance(normalized_input, normalized_city) <= tolerance:
+            return True
+    
     return False
 
-def filter_by_driver_zones(df, zones):
-    """Filtre les colis qui sont dans les zones d'un chauffeur."""
+def match_postal_code(sort_code, postal_codes):
+    """Vérifie si un code postal correspond à la liste assignée."""
+    if not postal_codes or not sort_code:
+        return False
+    
+    sort_code_str = str(sort_code).strip()
+    # Nettoyer le code postal (enlever espaces, leading zeros inconsistants)
+    sort_code_clean = sort_code_str.lstrip('0') if sort_code_str.startswith('0') else sort_code_str
+    
+    for cp in postal_codes:
+        cp_str = str(cp).strip()
+        cp_clean = cp_str.lstrip('0') if cp_str.startswith('0') else cp_str
+        
+        # Match exact
+        if sort_code_str == cp_str or sort_code_clean == cp_clean:
+            return True
+        
+        # Match par préfixe (ex: "51" matche "51100", "51200", etc.)
+        if len(cp_str) < 5 and (sort_code_str.startswith(cp_str) or sort_code_clean.startswith(cp_clean)):
+            return True
+    
+    return False
+
+def point_in_zones(lat, lon, zones):
+    """Vérifie si un point est dans une des zones géographiques."""
     if not zones:
-        return pd.DataFrame()
+        return False
+    point = Point(lon, lat)
+    for zone in zones:
+        try:
+            polygon = shape(zone)
+            if polygon.contains(point):
+                return True
+        except:
+            continue
+    return False
+
+def match_driver(row, driver_data):
+    """Vérifie si un colis correspond aux critères d'un chauffeur."""
+    # 1. Vérifier les codes postaux
+    postal_codes = driver_data.get("postal_codes", [])
+    sort_code = row.get('Sort Code', '')
+    if match_postal_code(sort_code, postal_codes):
+        return True
     
-    def is_in_zones(row):
-        if pd.isna(row['lat']) or pd.isna(row['lon']):
-            return False
-        return point_in_zones(row['lat'], row['lon'], zones)
+    # 2. Vérifier les villes
+    cities = driver_data.get("cities", [])
+    # Chercher la ville dans plusieurs colonnes possibles
+    city_columns = ["Receiver's City", "Receivers City", "City", "Ville"]
+    for col in city_columns:
+        if col in row.index:
+            city_value = row.get(col, '')
+            if fuzzy_match_city(city_value, cities):
+                return True
     
-    mask = df.apply(is_in_zones, axis=1)
-    return df[mask]
+    # 3. Vérifier les zones géographiques (si coordonnées disponibles)
+    zones = driver_data.get("zones", [])
+    lat = row.get('lat')
+    lon = row.get('lon')
+    if pd.notna(lat) and pd.notna(lon) and zones:
+        if point_in_zones(float(lat), float(lon), zones):
+            return True
+    
+    return False
 
 def auto_dispatch(df, patterns):
     """Dispatch automatique basé sur les patterns sauvegardés."""
@@ -101,17 +209,27 @@ def auto_dispatch(df, patterns):
     assigned_indices = set()
     
     for driver_name, driver_data in patterns.get("drivers", {}).items():
-        zones = driver_data.get("zones", [])
-        if not zones:
+        # Vérifier si le chauffeur a des critères définis
+        has_criteria = (
+            driver_data.get("zones", []) or 
+            driver_data.get("postal_codes", []) or 
+            driver_data.get("cities", [])
+        )
+        if not has_criteria:
             continue
         
-        driver_df = filter_by_driver_zones(df, zones)
+        # Filtrer les colis pour ce chauffeur
+        mask = df.apply(lambda row: match_driver(row, driver_data), axis=1)
+        driver_df = df[mask]
+        
+        # Exclure les colis déjà assignés
         driver_df = driver_df[~driver_df.index.isin(assigned_indices)]
         
         if not driver_df.empty:
             results[driver_name] = driver_df
             assigned_indices.update(driver_df.index.tolist())
     
+    # Colis non assignés
     unassigned = df[~df.index.isin(assigned_indices)]
     if not unassigned.empty:
         results["_NON_ASSIGNES"] = unassigned
@@ -134,19 +252,36 @@ def create_zip_with_excels(dispatch_results):
     zip_buffer.seek(0)
     return zip_buffer.getvalue()
 
+def get_driver_summary(driver_data):
+    """Génère un résumé des critères d'un chauffeur."""
+    parts = []
+    
+    zones = driver_data.get("zones", [])
+    if zones:
+        parts.append(f"{len(zones)} zone(s)")
+    
+    postal_codes = driver_data.get("postal_codes", [])
+    if postal_codes:
+        parts.append(f"CP: {', '.join(postal_codes[:3])}{'...' if len(postal_codes) > 3 else ''}")
+    
+    cities = driver_data.get("cities", [])
+    if cities:
+        parts.append(f"Villes: {', '.join(cities[:2])}{'...' if len(cities) > 2 else ''}")
+    
+    return " | ".join(parts) if parts else "Aucun critère"
+
 # === INTERFACE ===
 
 st.title("🚚 Dispatch Automatique - JNR Transport")
 
 patterns = load_patterns()
 
-tab1, tab2 = st.tabs(["📍 Configuration des Zones", "⚡ Dispatch Automatique"])
+tab1, tab2, tab3 = st.tabs(["📍 Zones Géographiques", "🏘️ Codes Postaux & Villes", "⚡ Dispatch Automatique"])
 
-# === TAB 1: CONFIGURATION DES ZONES ===
+# === TAB 1: CONFIGURATION DES ZONES GÉOGRAPHIQUES ===
 with tab1:
-    st.markdown("### Définir les zones de livraison par chauffeur")
+    st.markdown("### Définir les zones de livraison sur la carte")
     
-    # Options d'affichage
     col_options = st.columns([2, 1, 1])
     with col_options[0]:
         uploaded_ref = st.file_uploader(
@@ -158,7 +293,7 @@ with tab1:
         sample_rate = st.selectbox(
             "Afficher 1 point sur",
             options=[1, 5, 10, 20],
-            index=1,
+            index=2,
             help="Réduire pour plus de fluidité"
         )
     with col_options[2]:
@@ -169,14 +304,19 @@ with tab1:
     with col_right:
         st.markdown("#### 👥 Chauffeurs")
         
-        new_driver = st.text_input("Nom du chauffeur", placeholder="Ex: Mohamed")
-        if st.button("➕ Ajouter", use_container_width=True):
+        new_driver = st.text_input("Nom du chauffeur", placeholder="Ex: Mohamed", key="new_driver_tab1")
+        if st.button("➕ Ajouter", use_container_width=True, key="add_driver_tab1"):
             if new_driver and new_driver.strip():
                 driver_name = new_driver.strip()
                 if driver_name not in patterns.get("drivers", {}):
                     if "drivers" not in patterns:
                         patterns["drivers"] = {}
-                    patterns["drivers"][driver_name] = {"zones": [], "color": get_driver_color(len(patterns["drivers"]))}
+                    patterns["drivers"][driver_name] = {
+                        "zones": [], 
+                        "postal_codes": [],
+                        "cities": [],
+                        "color": get_driver_color(len(patterns["drivers"]))
+                    }
                     save_patterns(patterns)
                     st.success(f"✅ {driver_name} ajouté!")
                     st.rerun()
@@ -186,19 +326,19 @@ with tab1:
         st.markdown("---")
         
         selected_driver = st.selectbox(
-            "Sélectionner un chauffeur pour dessiner ses zones:",
+            "Chauffeur à configurer:",
             options=list(patterns.get("drivers", {}).keys()) or ["Aucun chauffeur"],
-            key="driver_select"
+            key="driver_select_tab1"
         )
         
-        st.markdown("#### 📊 Zones définies")
+        st.markdown("#### 📊 Résumé")
         for driver, data in patterns.get("drivers", {}).items():
-            zone_count = len(data.get("zones", []))
             color = data.get("color", "#666")
+            summary = get_driver_summary(data)
             st.markdown(f"""
-                <div style="display:flex; align-items:center; gap:8px; margin:4px 0; padding:8px; background:#f0f0f0; border-radius:4px; border-left:4px solid {color};">
-                    <span style="font-weight:bold;">{driver}</span>
-                    <span style="color:#666;">({zone_count} zone{'s' if zone_count > 1 else ''})</span>
+                <div style="margin:4px 0; padding:8px; background:#f8f9fa; border-radius:4px; border-left:4px solid {color};">
+                    <strong>{driver}</strong><br/>
+                    <small style="color:#666;">{summary}</small>
                 </div>
             """, unsafe_allow_html=True)
         
@@ -207,13 +347,15 @@ with tab1:
         if selected_driver and selected_driver != "Aucun chauffeur":
             st.markdown(f"**Actions pour {selected_driver}:**")
             
-            if st.button("🗑️ Supprimer ses zones", use_container_width=True):
-                patterns["drivers"][selected_driver]["zones"] = []
-                save_patterns(patterns)
-                st.success("Zones supprimées!")
-                st.rerun()
+            zones_count = len(patterns["drivers"].get(selected_driver, {}).get("zones", []))
+            if zones_count > 0:
+                if st.button(f"🗑️ Supprimer les {zones_count} zone(s)", use_container_width=True):
+                    patterns["drivers"][selected_driver]["zones"] = []
+                    save_patterns(patterns)
+                    st.success("Zones supprimées!")
+                    st.rerun()
             
-            if st.button("❌ Supprimer le chauffeur", use_container_width=True):
+            if st.button("❌ Supprimer le chauffeur", use_container_width=True, key="del_driver_tab1"):
                 del patterns["drivers"][selected_driver]
                 save_patterns(patterns)
                 st.success("Chauffeur supprimé!")
@@ -226,10 +368,11 @@ with tab1:
         if uploaded_ref:
             file_content = uploaded_ref.getvalue()
             df_ref = load_and_process_file(file_content, uploaded_ref.name)
-            df_map = df_ref.dropna(subset=['lat', 'lon']).copy()
-            if not df_map.empty:
-                center_lat = df_map['lat'].mean()
-                center_lon = df_map['lon'].mean()
+            if 'lat' in df_ref.columns and 'lon' in df_ref.columns:
+                df_map = df_ref.dropna(subset=['lat', 'lon']).copy()
+                if not df_map.empty:
+                    center_lat = df_map['lat'].mean()
+                    center_lon = df_map['lon'].mean()
         
         m = folium.Map(location=[center_lat, center_lon], zoom_start=10, prefer_canvas=True)
         
@@ -260,11 +403,10 @@ with tab1:
                     tooltip=driver
                 ).add_to(m)
         
-        # Afficher les points (échantillonnés) avec FastMarkerCluster
+        # Afficher les points
         if show_points and not df_map.empty:
             df_sampled = df_map.iloc[::sample_rate]
             
-            # Utiliser FastMarkerCluster pour de meilleures performances
             callback = """
             function (row) {
                 var marker = L.circleMarker(new L.LatLng(row[0], row[1]), {
@@ -280,11 +422,10 @@ with tab1:
             points_data = df_sampled[['lat', 'lon']].values.tolist()
             FastMarkerCluster(data=points_data, callback=callback).add_to(m)
             
-            st.caption(f"📍 {len(df_sampled)}/{len(df_map)} points affichés (1 sur {sample_rate})")
+            st.caption(f"📍 {len(df_sampled)}/{len(df_map)} points affichés")
         
         output = st_folium(m, width="100%", height=500, key="config_map", returned_objects=["all_drawings"])
         
-        # Capturer les nouvelles zones
         if output and output.get('all_drawings'):
             last_draw = output['all_drawings'][-1]
             if last_draw and 'geometry' in last_draw:
@@ -293,26 +434,163 @@ with tab1:
                 if st.button(f"✅ Assigner cette zone à {selected_driver}", type="primary"):
                     if selected_driver and selected_driver != "Aucun chauffeur":
                         geometry = last_draw['geometry']
+                        if "zones" not in patterns["drivers"][selected_driver]:
+                            patterns["drivers"][selected_driver]["zones"] = []
                         patterns["drivers"][selected_driver]["zones"].append(geometry)
                         save_patterns(patterns)
                         st.success(f"Zone ajoutée pour {selected_driver}!")
                         st.rerun()
 
-# === TAB 2: DISPATCH AUTOMATIQUE ===
+# === TAB 2: CODES POSTAUX & VILLES ===
 with tab2:
+    st.markdown("### Assigner des codes postaux et villes aux chauffeurs")
+    st.caption("💡 Pour les chauffeurs qui couvrent des zones entières sans besoin de tracer sur la carte")
+    
+    col1, col2 = st.columns([1, 2])
+    
+    with col1:
+        st.markdown("#### 👥 Chauffeurs")
+        
+        new_driver2 = st.text_input("Nom du chauffeur", placeholder="Ex: Mohamed", key="new_driver_tab2")
+        if st.button("➕ Ajouter", use_container_width=True, key="add_driver_tab2"):
+            if new_driver2 and new_driver2.strip():
+                driver_name = new_driver2.strip()
+                if driver_name not in patterns.get("drivers", {}):
+                    if "drivers" not in patterns:
+                        patterns["drivers"] = {}
+                    patterns["drivers"][driver_name] = {
+                        "zones": [], 
+                        "postal_codes": [],
+                        "cities": [],
+                        "color": get_driver_color(len(patterns["drivers"]))
+                    }
+                    save_patterns(patterns)
+                    st.success(f"✅ {driver_name} ajouté!")
+                    st.rerun()
+        
+        st.markdown("---")
+        
+        selected_driver2 = st.selectbox(
+            "Chauffeur à configurer:",
+            options=list(patterns.get("drivers", {}).keys()) or ["Aucun chauffeur"],
+            key="driver_select_tab2"
+        )
+    
+    with col2:
+        if selected_driver2 and selected_driver2 != "Aucun chauffeur":
+            driver_data = patterns["drivers"].get(selected_driver2, {})
+            color = driver_data.get("color", "#666")
+            
+            st.markdown(f"#### Configuration de <span style='color:{color}'>{selected_driver2}</span>", unsafe_allow_html=True)
+            
+            # === CODES POSTAUX ===
+            st.markdown("##### 📮 Codes Postaux")
+            current_cp = driver_data.get("postal_codes", [])
+            
+            cp_input = st.text_input(
+                "Ajouter des codes postaux (séparés par virgules)",
+                placeholder="Ex: 51100, 51110, 08",
+                key=f"cp_input_{selected_driver2}"
+            )
+            
+            col_cp1, col_cp2 = st.columns([3, 1])
+            with col_cp1:
+                if current_cp:
+                    st.write("Actuels: " + ", ".join([f"`{cp}`" for cp in current_cp]))
+                else:
+                    st.caption("Aucun code postal assigné")
+            
+            with col_cp2:
+                if st.button("➕ Ajouter CP", key=f"add_cp_{selected_driver2}"):
+                    if cp_input:
+                        new_cps = [cp.strip() for cp in cp_input.split(",") if cp.strip()]
+                        if "postal_codes" not in patterns["drivers"][selected_driver2]:
+                            patterns["drivers"][selected_driver2]["postal_codes"] = []
+                        for cp in new_cps:
+                            if cp not in patterns["drivers"][selected_driver2]["postal_codes"]:
+                                patterns["drivers"][selected_driver2]["postal_codes"].append(cp)
+                        save_patterns(patterns)
+                        st.success(f"Codes postaux ajoutés!")
+                        st.rerun()
+            
+            if current_cp:
+                if st.button("🗑️ Effacer tous les CP", key=f"clear_cp_{selected_driver2}"):
+                    patterns["drivers"][selected_driver2]["postal_codes"] = []
+                    save_patterns(patterns)
+                    st.rerun()
+            
+            st.markdown("---")
+            
+            # === VILLES ===
+            st.markdown("##### 🏘️ Villes & Villages")
+            st.caption("Tolérant aux fautes de frappe et accents (Reims = reims = REIMS)")
+            
+            current_cities = driver_data.get("cities", [])
+            
+            cities_input = st.text_input(
+                "Ajouter des villes (séparées par virgules)",
+                placeholder="Ex: Reims, Épernay, Châlons-en-Champagne",
+                key=f"cities_input_{selected_driver2}"
+            )
+            
+            col_city1, col_city2 = st.columns([3, 1])
+            with col_city1:
+                if current_cities:
+                    st.write("Actuelles: " + ", ".join([f"`{c}`" for c in current_cities]))
+                else:
+                    st.caption("Aucune ville assignée")
+            
+            with col_city2:
+                if st.button("➕ Ajouter Villes", key=f"add_cities_{selected_driver2}"):
+                    if cities_input:
+                        new_cities = [c.strip() for c in cities_input.split(",") if c.strip()]
+                        if "cities" not in patterns["drivers"][selected_driver2]:
+                            patterns["drivers"][selected_driver2]["cities"] = []
+                        for city in new_cities:
+                            if city not in patterns["drivers"][selected_driver2]["cities"]:
+                                patterns["drivers"][selected_driver2]["cities"].append(city)
+                        save_patterns(patterns)
+                        st.success(f"Villes ajoutées!")
+                        st.rerun()
+            
+            if current_cities:
+                if st.button("🗑️ Effacer toutes les villes", key=f"clear_cities_{selected_driver2}"):
+                    patterns["drivers"][selected_driver2]["cities"] = []
+                    save_patterns(patterns)
+                    st.rerun()
+            
+            st.markdown("---")
+            
+            # Résumé
+            st.markdown("##### 📋 Résumé")
+            zones_count = len(driver_data.get("zones", []))
+            st.info(f"""
+            **{selected_driver2}** recevra les colis qui correspondent à:
+            - **{len(current_cp)}** code(s) postal(aux)
+            - **{len(current_cities)}** ville(s)
+            - **{zones_count}** zone(s) géographique(s)
+            """)
+
+# === TAB 3: DISPATCH AUTOMATIQUE ===
+with tab3:
     st.markdown("### Importer et dispatcher automatiquement")
     
-    total_zones = sum(len(d.get("zones", [])) for d in patterns.get("drivers", {}).values())
+    # Compter les critères
+    total_criteria = 0
+    for d in patterns.get("drivers", {}).values():
+        total_criteria += len(d.get("zones", []))
+        total_criteria += len(d.get("postal_codes", []))
+        total_criteria += len(d.get("cities", []))
     
-    if total_zones == 0:
-        st.warning("⚠️ Aucune zone n'est configurée. Allez dans l'onglet 'Configuration des Zones' pour définir les zones de chaque chauffeur.")
+    if total_criteria == 0:
+        st.warning("⚠️ Aucun critère n'est configuré. Configurez des zones, codes postaux ou villes pour vos chauffeurs.")
     else:
-        st.success(f"✅ {len(patterns.get('drivers', {}))} chauffeur(s) configuré(s) avec {total_zones} zone(s) au total")
+        st.success(f"✅ {len(patterns.get('drivers', {}))} chauffeur(s) configuré(s)")
         
-        with st.expander("📋 Voir les chauffeurs configurés"):
+        with st.expander("📋 Voir la configuration"):
             for driver, data in patterns.get("drivers", {}).items():
-                zones = data.get("zones", [])
-                st.write(f"**{driver}**: {len(zones)} zone(s)")
+                summary = get_driver_summary(data)
+                st.write(f"**{driver}**: {summary}")
     
     st.markdown("---")
     
@@ -322,17 +600,25 @@ with tab2:
         key="dispatch_file"
     )
     
-    if uploaded_dispatch and total_zones > 0:
+    if uploaded_dispatch and total_criteria > 0:
         file_content = uploaded_dispatch.getvalue()
         df_dispatch = load_and_process_file(file_content, uploaded_dispatch.name)
         
-        df_with_coords = df_dispatch.dropna(subset=['lat', 'lon']).copy()
+        # Infos sur le fichier
+        has_gps = 'lat' in df_dispatch.columns and df_dispatch['lat'].notna().any()
+        has_city = "Receiver's City" in df_dispatch.columns or "Receivers City" in df_dispatch.columns
+        has_cp = "Sort Code" in df_dispatch.columns
         
-        st.info(f"📦 **{len(df_dispatch)}** colis chargés ({len(df_with_coords)} avec coordonnées GPS)")
+        st.info(f"""
+        📦 **{len(df_dispatch)}** colis chargés
+        - GPS: {'✅' if has_gps else '❌'}
+        - Ville: {'✅' if has_city else '❌'}  
+        - Code Postal: {'✅' if has_cp else '❌'}
+        """)
         
         if st.button("🚀 Lancer le dispatch automatique", type="primary", use_container_width=True):
             with st.spinner("Dispatch en cours..."):
-                results = auto_dispatch(df_with_coords, patterns)
+                results = auto_dispatch(df_dispatch, patterns)
             
             st.markdown("### 📊 Résultats du dispatch")
             
@@ -357,11 +643,14 @@ with tab2:
             
             if "_NON_ASSIGNES" in results:
                 unassigned = results["_NON_ASSIGNES"]
-                st.warning(f"⚠️ **{len(unassigned)}** colis non assignés (hors zones définies)")
+                st.warning(f"⚠️ **{len(unassigned)}** colis non assignés")
                 
                 with st.expander("Voir les colis non assignés"):
-                    display_cols = [c for c in ["Tracking No.", "Sort Code", "Receiver's City"] if c in unassigned.columns]
-                    st.dataframe(unassigned[display_cols].head(50))
+                    display_cols = [c for c in ["Tracking No.", "Sort Code", "Receiver's City", "Receiver's Detail Address"] if c in unassigned.columns]
+                    if display_cols:
+                        st.dataframe(unassigned[display_cols].head(100))
+                    else:
+                        st.dataframe(unassigned.head(100))
             
             st.markdown("---")
             st.markdown("### 📥 Télécharger les fichiers")
@@ -377,20 +666,25 @@ with tab2:
             
             st.markdown("---")
             st.markdown("**Ou télécharger individuellement:**")
+            
+            dl_cols = st.columns(3)
+            dl_idx = 0
             for driver_name, driver_df in results.items():
                 if driver_df.empty:
                     continue
                 
-                display_name = "Non assignés" if driver_name == "_NON_ASSIGNES" else driver_name
-                excel_data = preparer_telechargement_excel(driver_df)
-                
-                st.download_button(
-                    label=f"📄 {display_name} ({len(driver_df)} colis)",
-                    data=excel_data,
-                    file_name=f"{driver_name.replace(' ', '_')}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key=f"dl_{driver_name}"
-                )
+                with dl_cols[dl_idx % 3]:
+                    display_name = "Non assignés" if driver_name == "_NON_ASSIGNES" else driver_name
+                    excel_data = preparer_telechargement_excel(driver_df)
+                    
+                    st.download_button(
+                        label=f"📄 {display_name} ({len(driver_df)})",
+                        data=excel_data,
+                        file_name=f"{driver_name.replace(' ', '_')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key=f"dl_{driver_name}"
+                    )
+                dl_idx += 1
 
 # === SIDEBAR ===
 with st.sidebar:
@@ -418,11 +712,14 @@ with st.sidebar:
             st.error("Fichier JSON invalide")
     
     st.markdown("---")
-    st.markdown("### 📖 Guide rapide")
+    st.markdown("### 📖 Guide")
     st.markdown("""
-    1. **Ajouter chauffeurs** et dessiner leurs zones
-    2. **Réduire les points** (1 sur 10) pour plus de fluidité
-    3. **Dispatcher** dans l'onglet 2
+    **3 façons d'assigner:**
+    1. 📍 **Zones** - Dessiner sur la carte
+    2. 📮 **Codes Postaux** - Ex: 51100, 08
+    3. 🏘️ **Villes** - Tolérant aux fautes
+    
+    Les critères se cumulent!
     """)
     
     if patterns.get("updated_at"):
