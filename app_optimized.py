@@ -128,7 +128,7 @@ def create_zip_with_excels(dispatch_results):
                 continue
             excel_data = preparer_telechargement_excel(driver_df)
             safe_name = driver_name.replace(" ", "_").replace("/", "-")
-            filename = f"Tournee_{safe_name}.xlsx"
+            filename = f"{safe_name}.xlsx"
             zip_file.writestr(filename, excel_data)
     
     zip_buffer.seek(0)
@@ -387,7 +387,7 @@ with tab2:
                 st.download_button(
                     label=f"📄 {display_name} ({len(driver_df)} colis)",
                     data=excel_data,
-                    file_name=f"Tournee_{driver_name.replace(' ', '_')}.xlsx",
+                    file_name=f"{driver_name.replace(' ', '_')}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     key=f"dl_{driver_name}"
                 )
