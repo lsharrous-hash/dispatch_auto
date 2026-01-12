@@ -447,22 +447,32 @@ with tab1:
             if show_points and not df_map.empty:
                 df_sampled = df_map.iloc[::sample_rate]
                 
-                callback = """
-                function (row) {
-                    var marker = L.circleMarker(new L.LatLng(row[0], row[1]), {
-                        radius: 4,
-                        color: '#333',
-                        fillColor: '#333',
-                        fillOpacity: 0.6
-                    });
-                    return marker;
-                }
-                """
+                # Afficher chaque point individuellement (sans clustering)
+                for _, row in df_sampled.iterrows():
+                    folium.CircleMarker(
+                        location=[row['lat'], row['lon']],
+                        radius=5,
+                        color='#333',
+                        fill=True,
+                        fillColor='#333',
+                        fillOpacity=0.7,
+                        weight=1
+                    ).add_to(m)
                 
-                points_data = df_sampled[['lat', 'lon']].values.tolist()
-                FastMarkerCluster(data=points_data, callback=callback).add_to(m)
+                # Afficher le détail
+                if sample_rate == 1:
+                    st.caption(f"📍 {len(df_map)} points affichés")
+                else:
+                    st.caption(f"📍 {len(df_sampled)}/{len(df_map)} points affichés (1 sur {sample_rate})")
                 
-                st.caption(f"📍 {len(df_sampled)}/{len(df_map)} points affichés")
+                # Afficher les colis sans GPS si filtre actif
+                if uploaded_ref and 'selected_cp' in dir() and selected_cp:
+                    df_filtered_all = df_ref[df_ref['Sort Code'].isin(selected_cp)]
+                    total_colis = len(df_filtered_all)
+                    avec_gps = len(df_map)
+                    sans_gps = total_colis - avec_gps
+                    if sans_gps > 0:
+                        st.warning(f"⚠️ {sans_gps} colis sans coordonnées GPS (sur {total_colis} total)")
             
             output = st_folium(m, width="100%", height=500, key="config_map", returned_objects=["all_drawings"])
             
