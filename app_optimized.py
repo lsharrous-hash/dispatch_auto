@@ -312,6 +312,39 @@ with tab1:
         with col_options[2]:
             show_points = st.checkbox("Afficher les points", value=True)
         
+        # Charger les données pour avoir la liste des CP
+        df_map = pd.DataFrame()
+        available_cp = []
+        if uploaded_ref:
+            file_content = uploaded_ref.getvalue()
+            df_ref = load_and_process_file(file_content, uploaded_ref.name)
+            if 'lat' in df_ref.columns and 'lon' in df_ref.columns:
+                df_map = df_ref.dropna(subset=['lat', 'lon']).copy()
+            if 'Sort Code' in df_ref.columns:
+                available_cp = sorted(df_ref['Sort Code'].dropna().unique().tolist())
+        
+        # Filtre par codes postaux
+        if available_cp:
+            with st.expander("🔍 Filtrer par codes postaux", expanded=False):
+                col_filter1, col_filter2 = st.columns([3, 1])
+                with col_filter1:
+                    selected_cp = st.multiselect(
+                        "Afficher seulement ces codes postaux:",
+                        options=available_cp,
+                        default=[],
+                        placeholder="Tous les CP (cliquer pour filtrer)",
+                        key="cp_filter"
+                    )
+                with col_filter2:
+                    if selected_cp:
+                        st.metric("CP sélectionnés", len(selected_cp))
+                    else:
+                        st.metric("CP affichés", len(available_cp))
+            
+            # Filtrer le dataframe si des CP sont sélectionnés
+            if selected_cp and not df_map.empty:
+                df_map = df_map[df_map['Sort Code'].isin(selected_cp)]
+        
         col_left, col_right = st.columns([3, 1])
         
         with col_right:
@@ -377,15 +410,9 @@ with tab1:
         with col_left:
             center_lat, center_lon = 49.25, 4.03
             
-            df_map = pd.DataFrame()
-            if uploaded_ref:
-                file_content = uploaded_ref.getvalue()
-                df_ref = load_and_process_file(file_content, uploaded_ref.name)
-                if 'lat' in df_ref.columns and 'lon' in df_ref.columns:
-                    df_map = df_ref.dropna(subset=['lat', 'lon']).copy()
-                    if not df_map.empty:
-                        center_lat = df_map['lat'].mean()
-                        center_lon = df_map['lon'].mean()
+            if not df_map.empty:
+                center_lat = df_map['lat'].mean()
+                center_lon = df_map['lon'].mean()
             
             m = folium.Map(location=[center_lat, center_lon], zoom_start=10, prefer_canvas=True)
             
