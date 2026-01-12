@@ -290,164 +290,270 @@ tab1, tab2, tab3 = st.tabs(["📍 Zones Géographiques", "🏘️ Codes Postaux 
 with tab1:
     st.markdown("### Définir les zones de livraison sur la carte")
     
-    col_options = st.columns([2, 1, 1])
-    with col_options[0]:
-        uploaded_ref = st.file_uploader(
-            "Charger un fichier de référence", 
-            type=['csv', 'xlsx', 'xls'],
-            key="ref_file"
-        )
-    with col_options[1]:
-        sample_rate = st.selectbox(
-            "Afficher 1 point sur",
-            options=[1, 5, 10, 20],
-            index=2,
-            help="Réduire pour plus de fluidité"
-        )
-    with col_options[2]:
-        show_points = st.checkbox("Afficher les points", value=True)
+    # Sous-tabs pour les deux modes
+    subtab1, subtab2 = st.tabs(["✏️ Dessiner des zones", "🔧 Gérer les zones"])
     
-    col_left, col_right = st.columns([3, 1])
-    
-    with col_right:
-        st.markdown("#### 👥 Chauffeurs")
+    # === SOUS-TAB 1: DESSINER ===
+    with subtab1:
+        col_options = st.columns([2, 1, 1])
+        with col_options[0]:
+            uploaded_ref = st.file_uploader(
+                "Charger un fichier de référence", 
+                type=['csv', 'xlsx', 'xls'],
+                key="ref_file"
+            )
+        with col_options[1]:
+            sample_rate = st.selectbox(
+                "Afficher 1 point sur",
+                options=[1, 5, 10, 20],
+                index=2,
+                help="Réduire pour plus de fluidité"
+            )
+        with col_options[2]:
+            show_points = st.checkbox("Afficher les points", value=True)
         
-        new_driver = st.text_input("Nom du chauffeur", placeholder="Ex: Mohamed", key="new_driver_tab1")
-        if st.button("➕ Ajouter", use_container_width=True, key="add_driver_tab1"):
-            if new_driver and new_driver.strip():
-                driver_name = new_driver.strip()
-                if driver_name not in patterns.get("drivers", {}):
-                    if "drivers" not in patterns:
-                        patterns["drivers"] = {}
-                    patterns["drivers"][driver_name] = {
-                        "zones": [], 
-                        "postal_codes": [],
-                        "cities": [],
-                        "color": get_driver_color(len(patterns["drivers"]))
-                    }
-                    save_patterns(patterns)
-                    st.success(f"✅ {driver_name} ajouté!")
-                    st.rerun()
-                else:
-                    st.warning("Ce chauffeur existe déjà")
+        col_left, col_right = st.columns([3, 1])
         
-        st.markdown("---")
-        
-        selected_driver = st.selectbox(
-            "Chauffeur à configurer:",
-            options=list(patterns.get("drivers", {}).keys()) or ["Aucun chauffeur"],
-            key="driver_select_tab1"
-        )
-        
-        st.markdown("#### 📊 Résumé")
-        for driver, data in patterns.get("drivers", {}).items():
-            color = data.get("color", "#666")
-            summary = get_driver_summary(data)
-            st.markdown(f"""
-                <div style="margin:4px 0; padding:8px; background:#f8f9fa; border-radius:4px; border-left:4px solid {color};">
-                    <strong>{driver}</strong><br/>
-                    <small style="color:#666;">{summary}</small>
-                </div>
-            """, unsafe_allow_html=True)
-        
-        st.markdown("---")
-        
-        if selected_driver and selected_driver != "Aucun chauffeur":
-            st.markdown(f"**Actions pour {selected_driver}:**")
+        with col_right:
+            st.markdown("#### 👥 Chauffeurs")
             
-            zones_count = len(patterns["drivers"].get(selected_driver, {}).get("zones", []))
-            if zones_count > 0:
-                if st.button(f"🗑️ Supprimer les {zones_count} zone(s)", use_container_width=True):
-                    patterns["drivers"][selected_driver]["zones"] = []
-                    save_patterns(patterns)
-                    st.success("Zones supprimées!")
-                    st.rerun()
-            
-            if st.button("❌ Supprimer le chauffeur", use_container_width=True, key="del_driver_tab1"):
-                del patterns["drivers"][selected_driver]
-                save_patterns(patterns)
-                st.success("Chauffeur supprimé!")
-                st.rerun()
-    
-    with col_left:
-        center_lat, center_lon = 49.25, 4.03
-        
-        df_map = pd.DataFrame()
-        if uploaded_ref:
-            file_content = uploaded_ref.getvalue()
-            df_ref = load_and_process_file(file_content, uploaded_ref.name)
-            if 'lat' in df_ref.columns and 'lon' in df_ref.columns:
-                df_map = df_ref.dropna(subset=['lat', 'lon']).copy()
-                if not df_map.empty:
-                    center_lat = df_map['lat'].mean()
-                    center_lon = df_map['lon'].mean()
-        
-        m = folium.Map(location=[center_lat, center_lon], zoom_start=10, prefer_canvas=True)
-        
-        Draw(
-            export=False,
-            draw_options={
-                'polyline': False, 
-                'circle': False, 
-                'marker': False, 
-                'circlemarker': False, 
-                'polygon': True, 
-                'rectangle': True
-            }
-        ).add_to(m)
-        
-        # Afficher les zones existantes
-        for driver, data in patterns.get("drivers", {}).items():
-            color = data.get("color", "#666")
-            for zone in data.get("zones", []):
-                folium.GeoJson(
-                    zone,
-                    style_function=lambda x, c=color: {
-                        'fillColor': c,
-                        'color': c,
-                        'weight': 2,
-                        'fillOpacity': 0.3
-                    },
-                    tooltip=driver
-                ).add_to(m)
-        
-        # Afficher les points
-        if show_points and not df_map.empty:
-            df_sampled = df_map.iloc[::sample_rate]
-            
-            callback = """
-            function (row) {
-                var marker = L.circleMarker(new L.LatLng(row[0], row[1]), {
-                    radius: 4,
-                    color: '#333',
-                    fillColor: '#333',
-                    fillOpacity: 0.6
-                });
-                return marker;
-            }
-            """
-            
-            points_data = df_sampled[['lat', 'lon']].values.tolist()
-            FastMarkerCluster(data=points_data, callback=callback).add_to(m)
-            
-            st.caption(f"📍 {len(df_sampled)}/{len(df_map)} points affichés")
-        
-        output = st_folium(m, width="100%", height=500, key="config_map", returned_objects=["all_drawings"])
-        
-        if output and output.get('all_drawings'):
-            last_draw = output['all_drawings'][-1]
-            if last_draw and 'geometry' in last_draw:
-                st.info(f"🎯 Zone détectée! Cliquez pour l'assigner à **{selected_driver}**")
-                
-                if st.button(f"✅ Assigner cette zone à {selected_driver}", type="primary"):
-                    if selected_driver and selected_driver != "Aucun chauffeur":
-                        geometry = last_draw['geometry']
-                        if "zones" not in patterns["drivers"][selected_driver]:
-                            patterns["drivers"][selected_driver]["zones"] = []
-                        patterns["drivers"][selected_driver]["zones"].append(geometry)
+            new_driver = st.text_input("Nom du chauffeur", placeholder="Ex: Mohamed", key="new_driver_tab1")
+            if st.button("➕ Ajouter", use_container_width=True, key="add_driver_tab1"):
+                if new_driver and new_driver.strip():
+                    driver_name = new_driver.strip()
+                    if driver_name not in patterns.get("drivers", {}):
+                        if "drivers" not in patterns:
+                            patterns["drivers"] = {}
+                        patterns["drivers"][driver_name] = {
+                            "zones": [], 
+                            "postal_codes": [],
+                            "cities": [],
+                            "color": get_driver_color(len(patterns["drivers"]))
+                        }
                         save_patterns(patterns)
-                        st.success(f"Zone ajoutée pour {selected_driver}!")
+                        st.success(f"✅ {driver_name} ajouté!")
                         st.rerun()
+                    else:
+                        st.warning("Ce chauffeur existe déjà")
+            
+            st.markdown("---")
+            
+            selected_driver = st.selectbox(
+                "Chauffeur à configurer:",
+                options=list(patterns.get("drivers", {}).keys()) or ["Aucun chauffeur"],
+                key="driver_select_tab1"
+            )
+            
+            st.markdown("#### 📊 Résumé")
+            for driver, data in patterns.get("drivers", {}).items():
+                color = data.get("color", "#666")
+                summary = get_driver_summary(data)
+                st.markdown(f"""
+                    <div style="margin:4px 0; padding:8px; background:#f8f9fa; border-radius:4px; border-left:4px solid {color};">
+                        <strong>{driver}</strong><br/>
+                        <small style="color:#666;">{summary}</small>
+                    </div>
+                """, unsafe_allow_html=True)
+            
+            st.markdown("---")
+            
+            if selected_driver and selected_driver != "Aucun chauffeur":
+                st.markdown(f"**Actions pour {selected_driver}:**")
+                
+                zones_count = len(patterns["drivers"].get(selected_driver, {}).get("zones", []))
+                if zones_count > 0:
+                    if st.button(f"🗑️ Supprimer les {zones_count} zone(s)", use_container_width=True):
+                        patterns["drivers"][selected_driver]["zones"] = []
+                        save_patterns(patterns)
+                        st.success("Zones supprimées!")
+                        st.rerun()
+                
+                if st.button("❌ Supprimer le chauffeur", use_container_width=True, key="del_driver_tab1"):
+                    del patterns["drivers"][selected_driver]
+                    save_patterns(patterns)
+                    st.success("Chauffeur supprimé!")
+                    st.rerun()
+        
+        with col_left:
+            center_lat, center_lon = 49.25, 4.03
+            
+            df_map = pd.DataFrame()
+            if uploaded_ref:
+                file_content = uploaded_ref.getvalue()
+                df_ref = load_and_process_file(file_content, uploaded_ref.name)
+                if 'lat' in df_ref.columns and 'lon' in df_ref.columns:
+                    df_map = df_ref.dropna(subset=['lat', 'lon']).copy()
+                    if not df_map.empty:
+                        center_lat = df_map['lat'].mean()
+                        center_lon = df_map['lon'].mean()
+            
+            m = folium.Map(location=[center_lat, center_lon], zoom_start=10, prefer_canvas=True)
+            
+            Draw(
+                export=False,
+                draw_options={
+                    'polyline': False, 
+                    'circle': False, 
+                    'marker': False, 
+                    'circlemarker': False, 
+                    'polygon': True, 
+                    'rectangle': True
+                }
+            ).add_to(m)
+            
+            # Afficher les zones existantes
+            for driver, data in patterns.get("drivers", {}).items():
+                color = data.get("color", "#666")
+                for zone in data.get("zones", []):
+                    folium.GeoJson(
+                        zone,
+                        style_function=lambda x, c=color: {
+                            'fillColor': c,
+                            'color': c,
+                            'weight': 2,
+                            'fillOpacity': 0.3
+                        },
+                        tooltip=driver
+                    ).add_to(m)
+            
+            # Afficher les points
+            if show_points and not df_map.empty:
+                df_sampled = df_map.iloc[::sample_rate]
+                
+                callback = """
+                function (row) {
+                    var marker = L.circleMarker(new L.LatLng(row[0], row[1]), {
+                        radius: 4,
+                        color: '#333',
+                        fillColor: '#333',
+                        fillOpacity: 0.6
+                    });
+                    return marker;
+                }
+                """
+                
+                points_data = df_sampled[['lat', 'lon']].values.tolist()
+                FastMarkerCluster(data=points_data, callback=callback).add_to(m)
+                
+                st.caption(f"📍 {len(df_sampled)}/{len(df_map)} points affichés")
+            
+            output = st_folium(m, width="100%", height=500, key="config_map", returned_objects=["all_drawings"])
+            
+            if output and output.get('all_drawings'):
+                last_draw = output['all_drawings'][-1]
+                if last_draw and 'geometry' in last_draw:
+                    st.info(f"🎯 Zone détectée! Cliquez pour l'assigner à **{selected_driver}**")
+                    
+                    if st.button(f"✅ Assigner cette zone à {selected_driver}", type="primary"):
+                        if selected_driver and selected_driver != "Aucun chauffeur":
+                            geometry = last_draw['geometry']
+                            if "zones" not in patterns["drivers"][selected_driver]:
+                                patterns["drivers"][selected_driver]["zones"] = []
+                            patterns["drivers"][selected_driver]["zones"].append(geometry)
+                            save_patterns(patterns)
+                            st.success(f"Zone ajoutée pour {selected_driver}!")
+                            st.rerun()
+    
+    # === SOUS-TAB 2: GÉRER LES ZONES ===
+    with subtab2:
+        st.markdown("#### Réassigner ou supprimer des zones")
+        
+        # Compter toutes les zones
+        total_zones = sum(len(d.get("zones", [])) for d in patterns.get("drivers", {}).values())
+        
+        if total_zones == 0:
+            st.info("Aucune zone définie. Allez dans l'onglet 'Dessiner des zones' pour en créer.")
+        else:
+            col_manage_left, col_manage_right = st.columns([3, 1])
+            
+            with col_manage_right:
+                st.markdown("#### 🎯 Sélection")
+                
+                # Liste déroulante des chauffeurs qui ont des zones
+                drivers_with_zones = {d: data for d, data in patterns.get("drivers", {}).items() if data.get("zones")}
+                
+                if not drivers_with_zones:
+                    st.warning("Aucune zone à gérer")
+                else:
+                    selected_manage_driver = st.selectbox(
+                        "Chauffeur:",
+                        options=list(drivers_with_zones.keys()),
+                        key="manage_driver_select"
+                    )
+                    
+                    if selected_manage_driver:
+                        zones = patterns["drivers"][selected_manage_driver].get("zones", [])
+                        selected_zone_idx = st.selectbox(
+                            f"Zone de {selected_manage_driver}:",
+                            options=range(len(zones)),
+                            format_func=lambda x: f"Zone {x+1}",
+                            key="manage_zone_select"
+                        )
+                        
+                        st.markdown("---")
+                        st.markdown("#### ⚙️ Actions")
+                        
+                        # Réassigner
+                        other_drivers = [d for d in patterns.get("drivers", {}).keys() if d != selected_manage_driver]
+                        if other_drivers:
+                            reassign_to = st.selectbox(
+                                "Réassigner à:",
+                                options=other_drivers,
+                                key="reassign_to"
+                            )
+                            
+                            if st.button(f"↔️ Réassigner à {reassign_to}", use_container_width=True):
+                                # Récupérer la zone
+                                zone_to_move = patterns["drivers"][selected_manage_driver]["zones"][selected_zone_idx]
+                                # Retirer de l'ancien
+                                patterns["drivers"][selected_manage_driver]["zones"].pop(selected_zone_idx)
+                                # Ajouter au nouveau
+                                if "zones" not in patterns["drivers"][reassign_to]:
+                                    patterns["drivers"][reassign_to]["zones"] = []
+                                patterns["drivers"][reassign_to]["zones"].append(zone_to_move)
+                                save_patterns(patterns)
+                                st.success(f"Zone réassignée à {reassign_to}!")
+                                st.rerun()
+                        
+                        st.markdown("---")
+                        
+                        # Supprimer
+                        if st.button("🗑️ Supprimer cette zone", use_container_width=True, type="secondary"):
+                            patterns["drivers"][selected_manage_driver]["zones"].pop(selected_zone_idx)
+                            save_patterns(patterns)
+                            st.success("Zone supprimée!")
+                            st.rerun()
+            
+            with col_manage_left:
+                # Carte avec toutes les zones
+                center_lat, center_lon = 49.25, 4.03
+                m_manage = folium.Map(location=[center_lat, center_lon], zoom_start=10, prefer_canvas=True)
+                
+                # Afficher toutes les zones
+                for driver, data in patterns.get("drivers", {}).items():
+                    color = data.get("color", "#666")
+                    zones = data.get("zones", [])
+                    for idx, zone in enumerate(zones):
+                        # Mettre en évidence la zone sélectionnée
+                        is_selected = (
+                            'selected_manage_driver' in st.session_state and 
+                            'selected_zone_idx' in st.session_state and
+                            driver == st.session_state.get('selected_manage_driver') and 
+                            idx == st.session_state.get('selected_zone_idx')
+                        )
+                        
+                        folium.GeoJson(
+                            zone,
+                            style_function=lambda x, c=color, sel=is_selected: {
+                                'fillColor': c,
+                                'color': c,
+                                'weight': 4 if sel else 2,
+                                'fillOpacity': 0.5 if sel else 0.3
+                            },
+                            tooltip=f"{driver} - Zone {idx+1}"
+                        ).add_to(m_manage)
+                
+                st_folium(m_manage, width="100%", height=500, key="manage_map")
 
 # === TAB 2: CODES POSTAUX & VILLES ===
 with tab2:
