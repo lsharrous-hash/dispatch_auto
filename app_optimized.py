@@ -435,34 +435,34 @@ with tab1:
             
             st.caption(f"📍 {len(df_sampled)}/{len(df_map)} points affichés")
         
-        # Afficher les zones par code postal (cercles)
+        # Afficher les zones par code postal (convex hull approximatif)
         if show_postal_zones and not df_map.empty and 'Sort Code' in df_map.columns:
-            postal_codes = df_map['Sort Code'].unique()
-            colors_palette = ['#e74c3c', '#3498db', '#2ecc71', '#f39c12', '#9b59b6', '#1abc9c', '#e67e22', '#34495e']
+            from scipy.spatial import ConvexHull
+            import numpy as np
             
-            for idx, cp in enumerate(postal_codes[:20]):  # Limiter à 20 CP
+            postal_codes = df_map['Sort Code'].unique()
+            colors_palette = ['#e74c3c', '#3498db', '#2ecc71', '#f39c12', '#9b59b6', '#1abc9c', '#e67e22']
+            
+            for idx, cp in enumerate(postal_codes[:20]):  # Limiter à 20 CP pour la lisibilité
                 df_cp = df_map[df_map['Sort Code'] == cp]
-                if len(df_cp) >= 1:
-                    # Calculer le centre et le rayon
-                    center_lat = df_cp['lat'].mean()
-                    center_lon = df_cp['lon'].mean()
-                    
-                    # Calculer un rayon approximatif (distance max depuis le centre en km)
-                    distances = ((df_cp['lat'] - center_lat)**2 + (df_cp['lon'] - center_lon)**2)**0.5
-                    radius = distances.max() * 111  # Conversion approximative en km
-                    
-                    if radius > 0:
-                        folium.Circle(
-                            location=[center_lat, center_lon],
-                            radius=radius * 1000,  # en mètres
+                if len(df_cp) >= 3:  # Besoin de 3 points minimum pour un polygone
+                    try:
+                        points = df_cp[['lat', 'lon']].values
+                        hull = ConvexHull(points)
+                        hull_points = points[hull.vertices]
+                        
+                        folium.Polygon(
+                            locations=hull_points.tolist(),
                             color=colors_palette[idx % len(colors_palette)],
                             fill=True,
                             fillColor=colors_palette[idx % len(colors_palette)],
-                            fillOpacity=0.15,
+                            fillOpacity=0.1,
                             weight=2,
-                            opacity=0.6,
+                            opacity=0.5,
                             tooltip=f"CP: {cp} ({len(df_cp)} colis)"
                         ).add_to(m)
+                    except:
+                        pass
             
             st.caption(f"🗺️ Zones affichées pour {min(len(postal_codes), 20)} codes postaux")
         
