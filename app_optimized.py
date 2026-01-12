@@ -25,7 +25,15 @@ def load_and_process_file(file_content, file_name):
     """Cache le chargement des fichiers."""
     import io as io_module
     if file_name.lower().endswith('.xlsx') or file_name.lower().endswith('.xls'):
-        df = pd.read_excel(io_module.BytesIO(file_content), dtype=str)
+        # Charger une première fois pour vérifier les en-têtes
+        df_test = pd.read_excel(io_module.BytesIO(file_content), dtype=str, nrows=2)
+        
+        # Détecter si la première ligne contient les vrais en-têtes (colonnes "Unnamed")
+        if df_test.columns[0].startswith('Unnamed'):
+            # Les en-têtes sont dans la première ligne de données, pas dans la ligne 0
+            df = pd.read_excel(io_module.BytesIO(file_content), dtype=str, skiprows=1)
+        else:
+            df = pd.read_excel(io_module.BytesIO(file_content), dtype=str)
     else:
         text = file_content.decode('utf-8', errors='ignore')
         df = pd.read_csv(io_module.StringIO(text), sep=None, engine='python', dtype=str)
@@ -186,7 +194,7 @@ def match_driver(row, driver_data):
     # 2. Vérifier les villes
     cities = driver_data.get("cities", [])
     # Chercher la ville dans plusieurs colonnes possibles
-    city_columns = ["Receiver's City", "Receivers City", "City", "Ville"]
+    city_columns = ["Receiver's City", "Receivers City", "City", "Ville", "Receiver's Region/Province"]
     for col in city_columns:
         if col in row.index:
             city_value = row.get(col, '')
