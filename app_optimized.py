@@ -435,7 +435,7 @@ with tab1:
             
             st.caption(f"📍 {len(df_sampled)}/{len(df_map)} points affichés")
         
-        # Afficher les zones par code postal (convex hull approximatif)
+        # Afficher les zones par code postal (convex hull avec filtrage outliers)
         if show_postal_zones and not df_map.empty and 'Sort Code' in df_map.columns:
             from scipy.spatial import ConvexHull
             import numpy as np
@@ -443,25 +443,36 @@ with tab1:
             postal_codes = df_map['Sort Code'].unique()
             colors_palette = ['#e74c3c', '#3498db', '#2ecc71', '#f39c12', '#9b59b6', '#1abc9c', '#e67e22']
             
-            for idx, cp in enumerate(postal_codes[:20]):  # Limiter à 20 CP pour la lisibilité
+            for idx, cp in enumerate(postal_codes[:20]):  # Limiter à 20 CP
                 df_cp = df_map[df_map['Sort Code'] == cp]
-                if len(df_cp) >= 3:  # Besoin de 3 points minimum pour un polygone
+                if len(df_cp) >= 4:  # Besoin de 4 points minimum
                     try:
                         points = df_cp[['lat', 'lon']].values
-                        hull = ConvexHull(points)
-                        hull_points = points[hull.vertices]
                         
-                        folium.Polygon(
-                            locations=hull_points.tolist(),
-                            color=colors_palette[idx % len(colors_palette)],
-                            fill=True,
-                            fillColor=colors_palette[idx % len(colors_palette)],
-                            fillOpacity=0.1,
-                            weight=2,
-                            opacity=0.5,
-                            tooltip=f"CP: {cp} ({len(df_cp)} colis)"
-                        ).add_to(m)
-                    except:
+                        # Filtrer les outliers (points trop éloignés du centre)
+                        center = points.mean(axis=0)
+                        distances = np.sqrt(((points - center)**2).sum(axis=1))
+                        
+                        # Garder seulement les points dans les 95% les plus proches
+                        percentile_95 = np.percentile(distances, 95)
+                        mask = distances <= percentile_95
+                        filtered_points = points[mask]
+                        
+                        if len(filtered_points) >= 3:
+                            hull = ConvexHull(filtered_points)
+                            hull_points = filtered_points[hull.vertices]
+                            
+                            folium.Polygon(
+                                locations=hull_points.tolist(),
+                                color=colors_palette[idx % len(colors_palette)],
+                                fill=True,
+                                fillColor=colors_palette[idx % len(colors_palette)],
+                                fillOpacity=0.1,
+                                weight=2,
+                                opacity=0.5,
+                                tooltip=f"CP: {cp} ({len(df_cp)} colis)"
+                            ).add_to(m)
+                    except Exception as e:
                         pass
             
             st.caption(f"🗺️ Zones affichées pour {min(len(postal_codes), 20)} codes postaux")
