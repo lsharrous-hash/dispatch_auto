@@ -4,3 +4,4 @@ openpyxl
 folium
 streamlit-folium
 shapely
+scipy

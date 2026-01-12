@@ -307,6 +307,9 @@ with tab1:
     with col_options[2]:
         show_points = st.checkbox("Afficher les points", value=True)
     
+    with st.expander("🗺️ Options d'affichage avancées"):
+        show_postal_zones = st.checkbox("Afficher les zones par code postal", value=False, help="Affiche des zones approximatives pour chaque code postal")
+    
     col_left, col_right = st.columns([3, 1])
     
     with col_right:
@@ -431,6 +434,37 @@ with tab1:
             FastMarkerCluster(data=points_data, callback=callback).add_to(m)
             
             st.caption(f"📍 {len(df_sampled)}/{len(df_map)} points affichés")
+        
+        # Afficher les zones par code postal (convex hull approximatif)
+        if show_postal_zones and not df_map.empty and 'Sort Code' in df_map.columns:
+            from scipy.spatial import ConvexHull
+            import numpy as np
+            
+            postal_codes = df_map['Sort Code'].unique()
+            colors_palette = ['#e74c3c', '#3498db', '#2ecc71', '#f39c12', '#9b59b6', '#1abc9c', '#e67e22']
+            
+            for idx, cp in enumerate(postal_codes[:20]):  # Limiter à 20 CP pour la lisibilité
+                df_cp = df_map[df_map['Sort Code'] == cp]
+                if len(df_cp) >= 3:  # Besoin de 3 points minimum pour un polygone
+                    try:
+                        points = df_cp[['lat', 'lon']].values
+                        hull = ConvexHull(points)
+                        hull_points = points[hull.vertices]
+                        
+                        folium.Polygon(
+                            locations=hull_points.tolist(),
+                            color=colors_palette[idx % len(colors_palette)],
+                            fill=True,
+                            fillColor=colors_palette[idx % len(colors_palette)],
+                            fillOpacity=0.1,
+                            weight=2,
+                            opacity=0.5,
+                            tooltip=f"CP: {cp} ({len(df_cp)} colis)"
+                        ).add_to(m)
+                    except:
+                        pass
+            
+            st.caption(f"🗺️ Zones affichées pour {min(len(postal_codes), 20)} codes postaux")
         
         output = st_folium(m, width="100%", height=500, key="config_map", returned_objects=["all_drawings"])
         
