@@ -30,13 +30,16 @@ def load_and_process_file(file_content, file_name):
         
         # Détecter si la première ligne contient les vrais en-têtes (colonnes "Unnamed")
         if df_test.columns[0].startswith('Unnamed'):
-            # Les en-têtes sont dans la première ligne de données, pas dans la ligne 0
             df = pd.read_excel(io_module.BytesIO(file_content), dtype=str, skiprows=1)
         else:
             df = pd.read_excel(io_module.BytesIO(file_content), dtype=str)
     else:
         text = file_content.decode('utf-8', errors='ignore')
         df = pd.read_csv(io_module.StringIO(text), sep=None, engine='python', dtype=str)
+    
+    # Nettoyer les codes postaux (enlever apostrophes)
+    if 'Sort Code' in df.columns:
+        df['Sort Code'] = df['Sort Code'].astype(str).str.strip().str.lstrip("'").str.strip()
     
     # Parser GPS
     def split_gps(val):
@@ -88,12 +91,9 @@ def normalize_text(text):
     if not text or pd.isna(text):
         return ""
     text = str(text).lower().strip()
-    # Supprimer les accents
     text = unicodedata.normalize('NFD', text)
     text = ''.join(c for c in text if unicodedata.category(c) != 'Mn')
-    # Remplacer tirets et espaces multiples
     text = re.sub(r'[-_\s]+', ' ', text)
-    # Supprimer caractères spéciaux
     text = re.sub(r'[^a-z0-9\s]', '', text)
     return text.strip()
 
@@ -130,16 +130,12 @@ def fuzzy_match_city(city_input, city_list, max_distance=2):
         if not normalized_city:
             continue
         
-        # Match exact après normalisation
         if normalized_input == normalized_city:
             return True
         
-        # Match si l'un contient l'autre (pour "Reims,Reims" ou "Saint-Memmie")
         if normalized_input in normalized_city or normalized_city in normalized_input:
             return True
         
-        # Fuzzy match avec distance de Levenshtein
-        # Tolérance proportionnelle à la longueur du mot
         tolerance = min(max_distance, max(1, len(normalized_city) // 4))
         if levenshtein_distance(normalized_input, normalized_city) <= tolerance:
             return True
@@ -151,12 +147,12 @@ def match_postal_code(sort_code, postal_codes):
     if not postal_codes or not sort_code:
         return False
     
-    sort_code_str = str(sort_code).strip()
-    # Nettoyer le code postal (enlever espaces, leading zeros inconsistants)
+    # Nettoyer le code postal (enlever apostrophes, espaces, leading zeros)
+    sort_code_str = str(sort_code).strip().lstrip("'").strip()
     sort_code_clean = sort_code_str.lstrip('0') if sort_code_str.startswith('0') else sort_code_str
     
     for cp in postal_codes:
-        cp_str = str(cp).strip()
+        cp_str = str(cp).strip().lstrip("'").strip()
         cp_clean = cp_str.lstrip('0') if cp_str.startswith('0') else cp_str
         
         # Match exact
@@ -193,7 +189,6 @@ def match_driver(row, driver_data):
     
     # 2. Vérifier les villes
     cities = driver_data.get("cities", [])
-    # Chercher la ville dans plusieurs colonnes possibles
     city_columns = ["Receiver's City", "Receivers City", "City", "Ville", "Receiver's Region/Province"]
     for col in city_columns:
         if col in row.index:
@@ -217,7 +212,6 @@ def auto_dispatch(df, patterns):
     assigned_indices = set()
     
     for driver_name, driver_data in patterns.get("drivers", {}).items():
-        # Vérifier si le chauffeur a des critères définis
         has_criteria = (
             driver_data.get("zones", []) or 
             driver_data.get("postal_codes", []) or 
@@ -226,18 +220,14 @@ def auto_dispatch(df, patterns):
         if not has_criteria:
             continue
         
-        # Filtrer les colis pour ce chauffeur
         mask = df.apply(lambda row: match_driver(row, driver_data), axis=1)
         driver_df = df[mask]
-        
-        # Exclure les colis déjà assignés
         driver_df = driver_df[~driver_df.index.isin(assigned_indices)]
         
         if not driver_df.empty:
             results[driver_name] = driver_df
             assigned_indices.update(driver_df.index.tolist())
     
-    # Colis non assignés
     unassigned = df[~df.index.isin(assigned_indices)]
     if not unassigned.empty:
         results["_NON_ASSIGNES"] = unassigned
@@ -324,6 +314,7 @@ with tab1:
                 available_cp = sorted(df_ref['Sort Code'].dropna().unique().tolist())
         
         # Filtre par codes postaux
+        selected_cp = []
         if available_cp:
             with st.expander("🔍 Filtrer par codes postaux", expanded=False):
                 col_filter1, col_filter2 = st.columns([3, 1])
@@ -447,32 +438,35 @@ with tab1:
             if show_points and not df_map.empty:
                 df_sampled = df_map.iloc[::sample_rate]
                 
-                # Afficher chaque point individuellement (sans clustering)
-                for _, row in df_sampled.iterrows():
-                    folium.CircleMarker(
-                        location=[row['lat'], row['lon']],
-                        radius=5,
-                        color='#333',
-                        fill=True,
-                        fillColor='#333',
-                        fillOpacity=0.7,
-                        weight=1
-                    ).add_to(m)
-                
-                # Afficher le détail
                 if sample_rate == 1:
+                    # Mode 1/1 : afficher tous les points individuellement (sans clustering)
+                    for _, row in df_sampled.iterrows():
+                        folium.CircleMarker(
+                            location=[row['lat'], row['lon']],
+                            radius=5,
+                            color='#333',
+                            fill=True,
+                            fillColor='#333',
+                            fillOpacity=0.7,
+                            weight=1
+                        ).add_to(m)
                     st.caption(f"📍 {len(df_map)} points affichés")
                 else:
+                    # Mode échantillonné : utiliser le clustering pour la performance
+                    callback = """
+                    function (row) {
+                        var marker = L.circleMarker(new L.LatLng(row[0], row[1]), {
+                            radius: 4,
+                            color: '#333',
+                            fillColor: '#333',
+                            fillOpacity: 0.6
+                        });
+                        return marker;
+                    }
+                    """
+                    points_data = df_sampled[['lat', 'lon']].values.tolist()
+                    FastMarkerCluster(data=points_data, callback=callback).add_to(m)
                     st.caption(f"📍 {len(df_sampled)}/{len(df_map)} points affichés (1 sur {sample_rate})")
-                
-                # Afficher les colis sans GPS si filtre actif
-                if uploaded_ref and 'selected_cp' in dir() and selected_cp:
-                    df_filtered_all = df_ref[df_ref['Sort Code'].isin(selected_cp)]
-                    total_colis = len(df_filtered_all)
-                    avec_gps = len(df_map)
-                    sans_gps = total_colis - avec_gps
-                    if sans_gps > 0:
-                        st.warning(f"⚠️ {sans_gps} colis sans coordonnées GPS (sur {total_colis} total)")
             
             output = st_folium(m, width="100%", height=500, key="config_map", returned_objects=["all_drawings"])
             
@@ -495,7 +489,6 @@ with tab1:
     with subtab2:
         st.markdown("#### Réassigner ou supprimer des zones")
         
-        # Compter toutes les zones
         total_zones = sum(len(d.get("zones", [])) for d in patterns.get("drivers", {}).values())
         
         if total_zones == 0:
@@ -506,7 +499,6 @@ with tab1:
             with col_manage_right:
                 st.markdown("#### 🎯 Sélection")
                 
-                # Liste déroulante des chauffeurs qui ont des zones
                 drivers_with_zones = {d: data for d, data in patterns.get("drivers", {}).items() if data.get("zones")}
                 
                 if not drivers_with_zones:
@@ -530,7 +522,6 @@ with tab1:
                         st.markdown("---")
                         st.markdown("#### ⚙️ Actions")
                         
-                        # Réassigner
                         other_drivers = [d for d in patterns.get("drivers", {}).keys() if d != selected_manage_driver]
                         if other_drivers:
                             reassign_to = st.selectbox(
@@ -540,11 +531,8 @@ with tab1:
                             )
                             
                             if st.button(f"↔️ Réassigner à {reassign_to}", use_container_width=True):
-                                # Récupérer la zone
                                 zone_to_move = patterns["drivers"][selected_manage_driver]["zones"][selected_zone_idx]
-                                # Retirer de l'ancien
                                 patterns["drivers"][selected_manage_driver]["zones"].pop(selected_zone_idx)
-                                # Ajouter au nouveau
                                 if "zones" not in patterns["drivers"][reassign_to]:
                                     patterns["drivers"][reassign_to]["zones"] = []
                                 patterns["drivers"][reassign_to]["zones"].append(zone_to_move)
@@ -554,7 +542,6 @@ with tab1:
                         
                         st.markdown("---")
                         
-                        # Supprimer
                         if st.button("🗑️ Supprimer cette zone", use_container_width=True, type="secondary"):
                             patterns["drivers"][selected_manage_driver]["zones"].pop(selected_zone_idx)
                             save_patterns(patterns)
@@ -562,30 +549,20 @@ with tab1:
                             st.rerun()
             
             with col_manage_left:
-                # Carte avec toutes les zones
                 center_lat, center_lon = 49.25, 4.03
                 m_manage = folium.Map(location=[center_lat, center_lon], zoom_start=10, prefer_canvas=True)
                 
-                # Afficher toutes les zones
                 for driver, data in patterns.get("drivers", {}).items():
                     color = data.get("color", "#666")
                     zones = data.get("zones", [])
                     for idx, zone in enumerate(zones):
-                        # Mettre en évidence la zone sélectionnée
-                        is_selected = (
-                            'selected_manage_driver' in st.session_state and 
-                            'selected_zone_idx' in st.session_state and
-                            driver == st.session_state.get('selected_manage_driver') and 
-                            idx == st.session_state.get('selected_zone_idx')
-                        )
-                        
                         folium.GeoJson(
                             zone,
-                            style_function=lambda x, c=color, sel=is_selected: {
+                            style_function=lambda x, c=color: {
                                 'fillColor': c,
                                 'color': c,
-                                'weight': 4 if sel else 2,
-                                'fillOpacity': 0.5 if sel else 0.3
+                                'weight': 2,
+                                'fillOpacity': 0.3
                             },
                             tooltip=f"{driver} - Zone {idx+1}"
                         ).add_to(m_manage)
@@ -654,7 +631,7 @@ with tab2:
             with col_cp2:
                 if st.button("➕ Ajouter CP", key=f"add_cp_{selected_driver2}"):
                     if cp_input:
-                        new_cps = [cp.strip() for cp in cp_input.split(",") if cp.strip()]
+                        new_cps = [cp.strip().lstrip("'") for cp in cp_input.split(",") if cp.strip()]
                         if "postal_codes" not in patterns["drivers"][selected_driver2]:
                             patterns["drivers"][selected_driver2]["postal_codes"] = []
                         for cp in new_cps:
@@ -712,7 +689,6 @@ with tab2:
             
             st.markdown("---")
             
-            # Résumé
             st.markdown("##### 📋 Résumé")
             zones_count = len(driver_data.get("zones", []))
             st.info(f"""
@@ -726,7 +702,6 @@ with tab2:
 with tab3:
     st.markdown("### Importer et dispatcher automatiquement")
     
-    # Compter les critères
     total_criteria = 0
     for d in patterns.get("drivers", {}).values():
         total_criteria += len(d.get("zones", []))
@@ -755,7 +730,6 @@ with tab3:
         file_content = uploaded_dispatch.getvalue()
         df_dispatch = load_and_process_file(file_content, uploaded_dispatch.name)
         
-        # Infos sur le fichier
         has_gps = 'lat' in df_dispatch.columns and df_dispatch['lat'].notna().any()
         has_city = "Receiver's City" in df_dispatch.columns or "Receivers City" in df_dispatch.columns
         has_cp = "Sort Code" in df_dispatch.columns

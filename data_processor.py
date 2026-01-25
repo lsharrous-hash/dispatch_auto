@@ -63,7 +63,23 @@ def preparer_telechargement_excel(df_selection):
     """Génère un fichier Excel en mémoire pour le téléchargement Web."""
     output = io.BytesIO()
     # On retire les colonnes techniques lat/lon pour l'utilisateur final
-    df_export = df_selection.drop(columns=['lat', 'lon'], errors='ignore')
+    df_export = df_selection.drop(columns=['lat', 'lon'], errors='ignore').copy()
+    
+    # Ajouter/renommer la colonne Ville si elle n'existe pas
+    if 'Ville' not in df_export.columns:
+        # Chercher dans les colonnes possibles
+        city_cols = ["Receiver's City", "Receivers City", "Receiver's Region/Province"]
+        for col in city_cols:
+            if col in df_export.columns:
+                df_export['Ville'] = df_export[col]
+                break
+    
+    # Réorganiser les colonnes pour mettre les plus importantes en premier
+    priority_cols = ['Tracking No.', 'Sort Code', 'Ville', "Receiver's Detail Address"]
+    existing_priority = [c for c in priority_cols if c in df_export.columns]
+    other_cols = [c for c in df_export.columns if c not in existing_priority]
+    df_export = df_export[existing_priority + other_cols]
+    
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df_export.to_excel(writer, index=False)
     return output.getvalue()
