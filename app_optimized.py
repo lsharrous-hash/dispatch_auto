@@ -29,14 +29,52 @@ def load_and_process_file(file_content, file_name):
     file_ext = file_name.lower().split('.')[-1] if '.' in file_name else ''
     
     if file_ext in ['xlsx', 'xls']:
-        # Charger une première fois pour vérifier les en-têtes
-        df_test = pd.read_excel(io_module.BytesIO(file_content), dtype=str, nrows=2, engine='openpyxl')
+        # Essayer plusieurs méthodes de lecture pour les fichiers Excel problématiques
+        df = None
         
-        # Détecter si la première ligne contient les vrais en-têtes (colonnes "Unnamed")
-        if df_test.columns[0].startswith('Unnamed'):
-            df = pd.read_excel(io_module.BytesIO(file_content), dtype=str, skiprows=1, engine='openpyxl')
-        else:
-            df = pd.read_excel(io_module.BytesIO(file_content), dtype=str, engine='openpyxl')
+        # Méthode 1: openpyxl avec data_only=True (ignore les formules, lit les valeurs)
+        try:
+            from openpyxl import load_workbook
+            wb = load_workbook(io_module.BytesIO(file_content), data_only=True, read_only=True)
+            ws = wb.active
+            
+            # Lire les données manuellement
+            data = []
+            headers = None
+            for i, row in enumerate(ws.iter_rows(values_only=True)):
+                if i == 0:
+                    # Vérifier si c'est une ligne d'en-tête valide ou une ligne vide
+                    if row[0] is None or str(row[0]).startswith('Unnamed'):
+                        continue
+                    headers = [str(c) if c else f'Col_{j}' for j, c in enumerate(row)]
+                else:
+                    if headers is None:
+                        headers = [str(c) if c else f'Col_{j}' for j, c in enumerate(row)]
+                    else:
+                        # Ignorer les lignes complètement vides
+                        if any(c is not None for c in row):
+                            data.append(row)
+            
+            wb.close()
+            
+            if headers and data:
+                df = pd.DataFrame(data, columns=headers)
+                # Convertir tout en string
+                df = df.astype(str)
+                df = df.replace('None', pd.NA)
+        except Exception as e:
+            df = None
+        
+        # Méthode 2: pandas standard si la méthode 1 échoue
+        if df is None or len(df) == 0:
+            try:
+                df_test = pd.read_excel(io_module.BytesIO(file_content), dtype=str, nrows=2, engine='openpyxl')
+                if df_test.columns[0].startswith('Unnamed'):
+                    df = pd.read_excel(io_module.BytesIO(file_content), dtype=str, skiprows=1, engine='openpyxl')
+                else:
+                    df = pd.read_excel(io_module.BytesIO(file_content), dtype=str, engine='openpyxl')
+            except:
+                df = pd.read_excel(io_module.BytesIO(file_content), dtype=str)
     else:
         # CSV
         text = file_content.decode('utf-8', errors='ignore')
@@ -45,9 +83,11 @@ def load_and_process_file(file_content, file_name):
         except:
             df = pd.read_csv(io_module.StringIO(text), sep=',', dtype=str, on_bad_lines='skip')
     
-    # Nettoyer les codes postaux (enlever apostrophes)
+    # Nettoyer les codes postaux (enlever apostrophes et ajouter 0 manquant)
     if 'Sort Code' in df.columns:
         df['Sort Code'] = df['Sort Code'].astype(str).str.strip().str.lstrip("'").str.strip()
+        # Ajouter le 0 devant les codes postaux à 4 chiffres (ex: 2160 -> 02160)
+        df['Sort Code'] = df['Sort Code'].apply(lambda x: '0' + x if x.isdigit() and len(x) == 4 else x)
     
     # Parser GPS
     def split_gps(val):
