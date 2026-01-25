@@ -24,18 +24,26 @@ PATTERNS_FILE = "driver_patterns.json"
 def load_and_process_file(file_content, file_name):
     """Cache le chargement des fichiers."""
     import io as io_module
-    if file_name.lower().endswith('.xlsx') or file_name.lower().endswith('.xls'):
+    
+    # Forcer la détection par extension
+    file_ext = file_name.lower().split('.')[-1] if '.' in file_name else ''
+    
+    if file_ext in ['xlsx', 'xls']:
         # Charger une première fois pour vérifier les en-têtes
-        df_test = pd.read_excel(io_module.BytesIO(file_content), dtype=str, nrows=2)
+        df_test = pd.read_excel(io_module.BytesIO(file_content), dtype=str, nrows=2, engine='openpyxl')
         
         # Détecter si la première ligne contient les vrais en-têtes (colonnes "Unnamed")
         if df_test.columns[0].startswith('Unnamed'):
-            df = pd.read_excel(io_module.BytesIO(file_content), dtype=str, skiprows=1)
+            df = pd.read_excel(io_module.BytesIO(file_content), dtype=str, skiprows=1, engine='openpyxl')
         else:
-            df = pd.read_excel(io_module.BytesIO(file_content), dtype=str)
+            df = pd.read_excel(io_module.BytesIO(file_content), dtype=str, engine='openpyxl')
     else:
+        # CSV
         text = file_content.decode('utf-8', errors='ignore')
-        df = pd.read_csv(io_module.StringIO(text), sep=None, engine='python', dtype=str)
+        try:
+            df = pd.read_csv(io_module.StringIO(text), sep=None, engine='python', dtype=str, on_bad_lines='skip')
+        except:
+            df = pd.read_csv(io_module.StringIO(text), sep=',', dtype=str, on_bad_lines='skip')
     
     # Nettoyer les codes postaux (enlever apostrophes)
     if 'Sort Code' in df.columns:
