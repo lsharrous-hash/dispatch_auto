@@ -166,7 +166,9 @@ def levenshtein_distance(s1, s2):
 
 def fuzzy_match_city(city_input, city_list, max_distance=2):
     """Vérifie si une ville correspond à la liste avec tolérance aux fautes."""
-    if not city_list or not city_input:
+    if not city_list:
+        return False
+    if city_input is None or pd.isna(city_input) or str(city_input).strip() == '':
         return False
     
     normalized_input = normalize_text(city_input)
@@ -192,7 +194,9 @@ def fuzzy_match_city(city_input, city_list, max_distance=2):
 
 def match_postal_code(sort_code, postal_codes):
     """Vérifie si un code postal correspond à la liste assignée."""
-    if not postal_codes or not sort_code:
+    if not postal_codes:
+        return False
+    if sort_code is None or pd.isna(sort_code) or str(sort_code).strip() == '':
         return False
     
     # Nettoyer le code postal (enlever apostrophes, espaces, leading zeros)
