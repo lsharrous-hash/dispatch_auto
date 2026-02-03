@@ -83,6 +83,14 @@ def load_and_process_file(file_content, file_name):
         except:
             df = pd.read_csv(io_module.StringIO(text), sep=',', dtype=str, on_bad_lines='skip')
     
+    # === NORMALISER LES COLONNES ===
+    # Supprimer les colonnes vides (Col_XX)
+    df = df.loc[:, ~df.columns.str.match(r'^Col_\d+$')]
+    
+    # Normaliser "Receiver's Zip Code" -> "Sort Code" si absent
+    if 'Sort Code' not in df.columns and "Receiver's Zip Code" in df.columns:
+        df['Sort Code'] = df["Receiver's Zip Code"]
+    
     # Nettoyer les codes postaux (enlever apostrophes et ajouter 0 manquant)
     if 'Sort Code' in df.columns:
         df['Sort Code'] = df['Sort Code'].astype(str).str.strip().str.lstrip("'").str.strip()
@@ -98,15 +106,130 @@ def load_and_process_file(file_content, file_name):
         except: return None, None
     
     gps_columns = ["Receiver to (Latitude,Longitude)", "GPS", "Coordinates", "LatLng"]
+    has_gps_column = False
     for col in gps_columns:
         if col in df.columns:
             df[['lat', 'lon']] = df[col].apply(lambda x: pd.Series(split_gps(x)))
+            has_gps_column = True
             break
     
     if 'lat' in df.columns:
         df['lat'] = pd.to_numeric(df['lat'], errors='coerce')
     if 'lon' in df.columns:
         df['lon'] = pd.to_numeric(df['lon'], errors='coerce')
+    
+    # === GÉOCODAGE PAR CODE POSTAL si pas de GPS ===
+    if not has_gps_column or ('lat' in df.columns and df['lat'].isna().all()):
+        df = geocode_by_postal_code(df)
+    elif 'lat' in df.columns and df['lat'].isna().any():
+        # Géocoder seulement les colis sans GPS
+        mask_no_gps = df['lat'].isna()
+        if mask_no_gps.any():
+            df_no_gps = geocode_by_postal_code(df[mask_no_gps].copy())
+            df.loc[mask_no_gps, 'lat'] = df_no_gps['lat']
+            df.loc[mask_no_gps, 'lon'] = df_no_gps['lon']
+    
+    return df
+
+
+def geocode_by_postal_code(df):
+    """Géocode les colis par code postal + ville."""
+    if 'Sort Code' not in df.columns:
+        return df
+    
+    if 'lat' not in df.columns:
+        df['lat'] = pd.NA
+    if 'lon' not in df.columns:
+        df['lon'] = pd.NA
+    
+    # Trouver la colonne ville
+    city_col = None
+    for col in ["Receiver's City", "Receivers City", "City", "Receiver's Region/Province"]:
+        if col in df.columns:
+            city_col = col
+            break
+    
+    # Construire les requêtes uniques (CP + Ville)
+    geocode_cache = {}
+    
+    unique_locations = set()
+    for _, row in df.iterrows():
+        cp = str(row.get('Sort Code', '')).strip()
+        city = str(row.get(city_col, '')).strip() if city_col else ''
+        if cp and cp != 'nan':
+            unique_locations.add((cp, city))
+    
+    # Géocoder via l'API BAN (Base Adresse Nationale)
+    import urllib.request
+    import urllib.parse
+    
+    for cp, city in unique_locations:
+        cache_key = f"{cp}_{city}"
+        if cache_key in geocode_cache:
+            continue
+        
+        try:
+            query = f"{city}" if city and city != 'nan' else cp
+            params = urllib.parse.urlencode({
+                'q': query,
+                'postcode': cp,
+                'limit': 1
+            })
+            url = f"https://api-adresse.data.gouv.fr/search/?{params}"
+            
+            req = urllib.request.Request(url, headers={'User-Agent': 'JNR-Dispatch/1.0'})
+            with urllib.request.urlopen(req, timeout=5) as response:
+                result = json.loads(response.read().decode())
+                
+                if result.get('features'):
+                    coords = result['features'][0]['geometry']['coordinates']
+                    geocode_cache[cache_key] = (coords[1], coords[0])
+                else:
+                    geocode_cache[cache_key] = (None, None)
+        except:
+            geocode_cache[cache_key] = (None, None)
+    
+    # Appliquer les coordonnées
+    for idx, row in df.iterrows():
+        if pd.notna(row.get('lat')) and pd.notna(row.get('lon')):
+            continue
+        
+        cp = str(row.get('Sort Code', '')).strip()
+        city = str(row.get(city_col, '')).strip() if city_col else ''
+        cache_key = f"{cp}_{city}"
+        
+        if cache_key in geocode_cache:
+            lat, lon = geocode_cache[cache_key]
+            if lat is not None:
+                df.at[idx, 'lat'] = lat
+                df.at[idx, 'lon'] = lon
+    
+    # Vérifier combien ont été géocodés
+    geocoded = df['lat'].notna().sum()
+    total = len(df)
+    if geocoded < total:
+        # Fallback: utiliser les coordonnées du centre du code postal
+        cp_centers = {}
+        for idx, row in df.iterrows():
+            if pd.notna(row.get('lat')):
+                cp = str(row.get('Sort Code', '')).strip()
+                if cp not in cp_centers:
+                    cp_centers[cp] = []
+                cp_centers[cp].append((float(row['lat']), float(row['lon'])))
+        
+        # Calculer les centres
+        for cp, coords in cp_centers.items():
+            avg_lat = sum(c[0] for c in coords) / len(coords)
+            avg_lon = sum(c[1] for c in coords) / len(coords)
+            cp_centers[cp] = (avg_lat, avg_lon)
+        
+        # Appliquer aux colis restants
+        for idx, row in df.iterrows():
+            if pd.isna(row.get('lat')):
+                cp = str(row.get('Sort Code', '')).strip()
+                if cp in cp_centers:
+                    df.at[idx, 'lat'] = cp_centers[cp][0]
+                    df.at[idx, 'lon'] = cp_centers[cp][1]
     
     return df
 
