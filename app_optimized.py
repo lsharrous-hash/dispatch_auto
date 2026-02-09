@@ -129,6 +129,83 @@ def load_and_process_file(file_content, file_name):
             df.loc[mask_no_gps, 'lat'] = df_no_gps['lat']
             df.loc[mask_no_gps, 'lon'] = df_no_gps['lon']
     
+    # === GÉOCODAGE INVERSE pour adresses censurées (******) ===
+    addr_col = None
+    for col in ["Receiver's Detail Address", "Receivers Detail Address", "Address"]:
+        if col in df.columns:
+            addr_col = col
+            break
+    
+    if addr_col and 'lat' in df.columns and 'lon' in df.columns:
+        # Détecter les adresses censurées (contiennent * ou sont vides)
+        mask_censored = df[addr_col].apply(lambda x: '*' in str(x) if pd.notna(x) else True)
+        mask_has_gps = df['lat'].notna() & df['lon'].notna()
+        mask_to_reverse = mask_censored & mask_has_gps
+        
+        if mask_to_reverse.any():
+            df = reverse_geocode_addresses(df, addr_col, mask_to_reverse)
+    
+    return df
+
+
+def reverse_geocode_addresses(df, addr_col, mask):
+    """Récupère les adresses réelles à partir des coordonnées GPS."""
+    import urllib.request
+    import urllib.parse
+    
+    # Cache pour éviter les appels dupliqués (même coordonnées)
+    reverse_cache = {}
+    
+    # Collecter les coordonnées uniques
+    coords_to_lookup = []
+    for idx in df[mask].index:
+        lat = df.at[idx, 'lat']
+        lon = df.at[idx, 'lon']
+        if pd.notna(lat) and pd.notna(lon):
+            coords_to_lookup.append((idx, round(float(lat), 6), round(float(lon), 6)))
+    
+    # Géocoder par batch (limiter les appels API)
+    for idx, lat, lon in coords_to_lookup:
+        cache_key = f"{lat}_{lon}"
+        
+        if cache_key not in reverse_cache:
+            try:
+                params = urllib.parse.urlencode({
+                    'lat': lat,
+                    'lon': lon
+                })
+                url = f"https://api-adresse.data.gouv.fr/reverse/?{params}"
+                
+                req = urllib.request.Request(url, headers={'User-Agent': 'JNR-Dispatch/1.0'})
+                with urllib.request.urlopen(req, timeout=5) as response:
+                    result = json.loads(response.read().decode())
+                    
+                    if result.get('features'):
+                        props = result['features'][0]['properties']
+                        reverse_cache[cache_key] = {
+                            'address': props.get('name', ''),
+                            'city': props.get('city', ''),
+                            'postcode': props.get('postcode', ''),
+                            'label': props.get('label', '')
+                        }
+                    else:
+                        reverse_cache[cache_key] = None
+            except:
+                reverse_cache[cache_key] = None
+        
+        # Appliquer l'adresse trouvée
+        if reverse_cache.get(cache_key):
+            addr_info = reverse_cache[cache_key]
+            df.at[idx, addr_col] = addr_info['address']
+            
+            # Mettre à jour la ville si elle est aussi censurée
+            for city_col in ["Receiver's City", "Receivers City"]:
+                if city_col in df.columns:
+                    current_city = str(df.at[idx, city_col])
+                    if '*' in current_city or pd.isna(df.at[idx, city_col]):
+                        df.at[idx, city_col] = addr_info['city']
+                    break
+    
     return df
 
 
