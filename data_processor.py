@@ -62,8 +62,13 @@ def filtrer_colis_par_zone(df, last_draw):
 def preparer_telechargement_excel(df_selection):
     """Génère un fichier Excel en mémoire pour le téléchargement Web."""
     output = io.BytesIO()
-    # On retire les colonnes techniques lat/lon pour l'utilisateur final
-    df_export = df_selection.drop(columns=['lat', 'lon'], errors='ignore').copy()
+    df_export = df_selection.copy()
+    
+    # Renommer lat/lon en Latitude/Longitude pour plus de clarté
+    if 'lat' in df_export.columns:
+        df_export = df_export.rename(columns={'lat': 'Latitude'})
+    if 'lon' in df_export.columns:
+        df_export = df_export.rename(columns={'lon': 'Longitude'})
     
     # Ajouter/renommer la colonne Ville si elle n'existe pas
     if 'Ville' not in df_export.columns:
@@ -75,7 +80,7 @@ def preparer_telechargement_excel(df_selection):
                 break
     
     # Réorganiser les colonnes pour mettre les plus importantes en premier
-    priority_cols = ['Tracking No.', 'Sort Code', 'Ville', "Receiver's Detail Address"]
+    priority_cols = ['Tracking No.', 'Sort Code', 'Ville', "Receiver's Detail Address", 'Latitude', 'Longitude']
     existing_priority = [c for c in priority_cols if c in df_export.columns]
     other_cols = [c for c in df_export.columns if c not in existing_priority]
     df_export = df_export[existing_priority + other_cols]
