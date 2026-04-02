@@ -95,7 +95,7 @@ def load_and_process_file(file_content, file_name):
     if 'Sort Code' in df.columns:
         df['Sort Code'] = df['Sort Code'].astype(str).str.strip().str.lstrip("'").str.strip()
         # Ajouter le 0 devant les codes postaux à 4 chiffres (ex: 2160 -> 02160)
-        df['Sort Code'] = df['Sort Code'].apply(lambda x: '0' + x if x.isdigit() and len(x) == 4 else x)
+        df['Sort Code'] = df['Sort Code'].apply(lambda x: '0' + x if pd.notna(x) and str(x) not in ['', 'nan', 'None', 'NA'] and str(x).isdigit() and len(str(x)) == 4 else x)
     
     # Parser GPS
     def split_gps(val):
