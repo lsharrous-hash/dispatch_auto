@@ -16,6 +16,16 @@ def load_data(uploaded_file):
     except Exception as e:
         return None, f"Erreur de lecture : {e}"
 
+    # Format EPOD_TASK_LIST_V2
+    v2_map = {"Waybill Number": "Tracking No.", "Zip Code": "Receiver's Zip Code",
+              "The destination city": "Receiver's City", "Detailed address": "Receiver's Detail Address"}
+    for s, d in v2_map.items():
+        if s in df.columns and d not in df.columns:
+            df[d] = df[s]
+    if "Receiver to Latitude" in df.columns and "Receiver to Longitude" in df.columns:
+        df['lat'] = pd.to_numeric(df["Receiver to Latitude"], errors='coerce')
+        df['lon'] = pd.to_numeric(df["Receiver to Longitude"], errors='coerce')
+
     def split_gps(val):
         try:
             if pd.isna(val) or ',' not in str(val): return None, None
