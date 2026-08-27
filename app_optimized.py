@@ -87,6 +87,18 @@ def load_and_process_file(file_content, file_name):
     # Supprimer les colonnes vides (Col_XX)
     df = df.loc[:, ~df.columns.str.match(r'^Col_\d+$')]
     
+    # === FORMAT EPOD_TASK_LIST_V2 (nouvel export Cainiao) ===
+    # Mapper les colonnes V2 vers les noms attendus par le reste de l'app
+    v2_map = {
+        "Waybill Number": "Tracking No.",
+        "Zip Code": "Receiver's Zip Code",
+        "The destination city": "Receiver's City",
+        "Detailed address": "Receiver's Detail Address",
+    }
+    for src_col, dst_col in v2_map.items():
+        if src_col in df.columns and dst_col not in df.columns:
+            df[dst_col] = df[src_col]
+
     # Normaliser "Receiver's Zip Code" -> "Sort Code" si absent
     if 'Sort Code' not in df.columns and "Receiver's Zip Code" in df.columns:
         df['Sort Code'] = df["Receiver's Zip Code"]
@@ -107,11 +119,17 @@ def load_and_process_file(file_content, file_name):
     
     gps_columns = ["Receiver to (Latitude,Longitude)", "GPS", "Coordinates", "LatLng"]
     has_gps_column = False
-    for col in gps_columns:
-        if col in df.columns:
-            df[['lat', 'lon']] = df[col].apply(lambda x: pd.Series(split_gps(x)))
-            has_gps_column = True
-            break
+    # Format V2 : latitude et longitude dans deux colonnes séparées
+    if "Receiver to Latitude" in df.columns and "Receiver to Longitude" in df.columns:
+        df['lat'] = df["Receiver to Latitude"]
+        df['lon'] = df["Receiver to Longitude"]
+        has_gps_column = True
+    else:
+        for col in gps_columns:
+            if col in df.columns:
+                df[['lat', 'lon']] = df[col].apply(lambda x: pd.Series(split_gps(x)))
+                has_gps_column = True
+                break
     
     if 'lat' in df.columns:
         df['lat'] = pd.to_numeric(df['lat'], errors='coerce')
